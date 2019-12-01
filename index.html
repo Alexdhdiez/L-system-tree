@@ -1,0 +1,1035 @@
+<!doctype html>
+<html>
+	<head>
+		<title>L-system tree</title>
+		<meta charset="utf-8">
+		<style>
+			body{ background-color: #ffdead; }
+			canvas{ background-color: #EAFFFF; }
+		</style>
+		<script type="text/javascript" src="GlMatrix.js"></script>
+
+
+		<script id="shader-vs" type="x-shader/x-vertex">
+		    /* Es el VERTEX SHADER*/
+		    /* Transforma los vertices*/
+
+				uniform mat4 uMvMatrix;
+			  uniform mat4 uPMatrix;
+
+				attribute vec3 aVertexPosition;
+
+				attribute vec3 aVertexColor;
+				varying highp vec4 vColor;
+
+			void main(void) {
+			    gl_Position = uPMatrix*uMvMatrix*vec4(aVertexPosition, 1.0);
+					gl_PointSize = 10.0;
+					vColor = vec4(aVertexColor, 1.0);
+			}
+		</script>
+
+
+
+		<script id="shader-fs" type="x-shader/x-fragment">
+
+			varying highp vec4 vColor;
+
+			void main(void) {
+					gl_FragColor = vColor;
+			}
+
+		</script>
+
+
+		<script>
+			var gl = null,
+				canvas = null,
+				glProgram = null,
+				fragmentShader = null,
+				vertexShader = null;
+
+			var lineVertices = [];
+			var leavesVertices = [];
+
+			var vertexPositionAttribute = null;
+
+			var HojasVerticeBuffer = null;
+			var RamasVerticeBuffer = null;
+
+			var ColorRamas = [];
+			var colorBuffer = null;
+
+			var ColorHojas = [];
+			var colorBufferHojas = null;
+
+
+			var gramatica = 0;
+
+					/*Niveles de la recursion*/
+      var niveles = 9;
+			/*Angulo de bifurcacion*/
+			var angle = 40;
+			/*Probabilidad de realizar un giro en la ramificación*/
+			var p_giro = 0.7;
+			/*Probabilidad de generar flores*/
+			var p_flor = 0.05;
+
+			/*Angulos de la rotacion del vector H que indicara el movimiento de la tortuga*/
+			var anguloU = null;
+			var anguloH = null;
+			var anguloL = null;
+
+			//Tronco
+			var genTronco = [ 'F', 'F', 'F', 'F', 'F', 'F', 'F', 'F', 'F' ];
+
+			/************** Gramaticas ****************
+					O
+					O -> F A B C D E G
+					A -> F h / f [ + f O f ]
+					B -> F h ? f [ - f O f ]
+					C -> F h ^ f [ & f O f ]
+					D -> F h & f [ ^ f O f ]
+					E -> F h - f [ ? f O f ]
+					G -> F h + f [ / f O f ]
+				F: Avanzar y pintar
+				h: pintar una hoja
+				f: pintar una flor
+				+: rotar derecha (z)
+				-: rotar izquierda (z)
+				^: rotar arriba (x)
+				&: rotar abajo (x)
+				?: rotar izquierda (y)
+				/: rotar derecha (y)
+				*/
+
+			// Axioma
+			var palabra_inic = 'O';
+
+			//Producciones
+			var gen0 = [ 'F', /*'F',*/ 'A', 'B', 'C', 'D', 'E', 'G'];
+
+			var genA = [ 'F', 'f', '/', 'h', '[', '+', 'h', 'O', 'h', ']' ];
+			var genB = [ 'F', 'f', '?', 'h', '[', '-', 'h', 'O', 'h', ']' ];
+			var genC = [ 'F', 'f', '^', 'h', '[', '&', 'h', 'O', 'h', ']' ];
+			var genD = [ 'F', 'f', '&', 'h', '[', '^', 'h', 'O', 'h', ']' ];
+			var genE = [ 'F', 'f', '-', 'h', '[', '?', 'h', 'O', 'h', ']' ];
+			var genG = [ 'F', 'f', '+', 'h', '[', '/', 'h', 'O', 'h', ']' ];
+
+			//Almacenara la palabra que se cree
+			var palabra_act = [];
+
+			//Coordenadas del primer punto del arbol
+			var tronco = [0,-0.8, 0];
+
+			/*Movimiento de raton*/
+			let ratonAbajo = false;
+		  let posRatonX = null;
+		  let posRatonY = null;
+
+	    let MvMatrix=null,
+	        PMatrix=null;
+
+	    let uMvmatrix=null, uPMatrix=null;
+
+			function initWebGL()
+			{
+				canvas = document.getElementById("ejemplo-shader");
+
+				gl = canvas.getContext("webgl");
+
+
+				if(gl)
+				{
+					setupWebGL();
+					initShaders();
+					deteccionRaton();
+
+					palabra(gen0
+									,genA
+									,genB
+									,genC
+									,genD
+									,genE
+									,genG, niveles, palabra_inic);
+					tortuga(palabra_act, tronco, angle, p_flor);
+
+					setupBuffersRamas();
+					drawSceneRamas();
+
+					setupBuffersHojas();
+					drawSceneHojas();
+
+					animacion();
+				}else{
+					alert("El navegador no soporta WEBGL.");
+				}
+			}
+
+			function setupWebGL()
+			{
+				gl.clearColor(0, 0, 0, 0);
+
+				gl.viewport(0, 0, canvas.width, canvas.height);
+
+				gl.enable(gl.DEPTH_TEST);
+
+				gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+
+        inicializarMatrices();
+			}
+
+			function initShaders()
+			{
+			 // Esta función inicializa los shaders
+
+				//1.Obtengo la referencia de los shaders
+				var fs_source = document.getElementById('shader-fs').innerHTML;
+				var vs_source = document.getElementById('shader-vs').innerHTML;
+
+				//2. Compila los shaders
+				vertexShader = makeShader(vs_source, gl.VERTEX_SHADER);
+				fragmentShader = makeShader(fs_source, gl.FRAGMENT_SHADER);
+
+				//3. Crea un programa
+				glProgram = gl.createProgram();
+
+				//4. Adjunta al programa cada shader
+				  gl.attachShader(glProgram, vertexShader);
+				  gl.attachShader(glProgram, fragmentShader);
+				  gl.linkProgram(glProgram);
+
+				if (!gl.getProgramParameter(glProgram, gl.LINK_STATUS)) {
+				   alert("No se puede inicializar el Programa .");
+				  }
+
+				//5. Usa el programa
+				gl.useProgram(glProgram);
+			}
+
+			function makeShader(src, type)
+			{
+				//compile the vertex shader
+				var shader = gl.createShader(type);
+				gl.shaderSource(shader, src);
+				gl.compileShader(shader);
+
+				if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+				      alert("Error de compilación del shader: " + gl.getShaderInfoLog(shader));
+				  }
+				return shader;
+			}
+
+/*
+****************
+ RATON: Funciones de control del Movimiento y Rotación
+****************
+*/
+
+			function deteccionRaton(){
+
+				canvas.onmousedown=pulsaRatonAbajo;
+				document.onmouseup=pulsaRatonArriba;
+				document.onmousemove=mueveRaton;
+			}
+
+			function inicializarMatrices(){
+				MvMatrix=mat4.create();
+				PMatrix=mat4.create();
+
+				mat4.identity(MvMatrix);
+				mat4.identity(PMatrix);
+
+			}
+
+			function pulsaRatonAbajo(event) {
+				ratonAbajo = true;
+				posRatonX = event.clientX;
+				posRatonY = event.clientY;
+			}
+
+
+			function pulsaRatonArriba(event) {
+				ratonAbajo = false;
+			}
+
+
+			function mueveRaton(event) {
+				if (!ratonAbajo) {
+						return;
+				}
+				let nuevaX = event.clientX;
+				let nuevaY = event.clientY;
+				let deltaX = nuevaX - posRatonX;
+				let deltaY = nuevaY - posRatonY;
+
+				let idMatrix=mat4.create();
+				mat4.identity(idMatrix);
+
+				mat4.rotate(idMatrix,degToRad(deltaX/2), [0,1,0]);
+				mat4.rotate(idMatrix,degToRad(deltaY/2), [1,0,0]);
+
+				mat4.multiply(idMatrix,MvMatrix,MvMatrix);
+				posRatonX = nuevaX;
+				posRatonY = nuevaY;
+			}
+
+			function degToRad(degrees) {
+				return degrees * Math.PI / 180;
+			}
+
+/*
+***********************
+funcion: setupBuffersRamas
+Iniciara los buffers con los vertices para crear las ramas
+***********************
+*/
+
+
+			function setupBuffersRamas()
+			{
+				//BUFFERS PARA LAS RAMAS
+				RamasVerticeBuffer = gl.createBuffer();
+
+				//Enlazo al buffer
+				gl.bindBuffer(gl.ARRAY_BUFFER, RamasVerticeBuffer);//ARRAY_BUFFER son datos vertice
+				//Enviamos los datos al Buffer
+				gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(lineVertices), gl.STATIC_DRAW);
+
+				//BUFFER de color
+		    colorBuffer = gl.createBuffer();
+		    gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
+		    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(ColorRamas), gl.STATIC_DRAW);
+
+		    colorLocation = gl.getAttribLocation(glProgram, "aVertexColor");
+		    gl.enableVertexAttribArray(colorLocation);
+		    gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
+		    gl.vertexAttribPointer(colorLocation, 3, gl.FLOAT, false, 0, 0);
+
+				uMvMatrix = gl.getUniformLocation(glProgram, 'uMvMatrix');
+				uPMatrix = gl.getUniformLocation(glProgram, 'uPMatrix');
+			}
+
+/*
+*********************
+funcion: drawSceneRamas
+Dibujara las ramas del arbol
+*********************
+*/
+
+			function drawSceneRamas()
+			{
+				gl.uniformMatrix4fv(uMvMatrix, false, MvMatrix);
+				gl.uniformMatrix4fv(uPMatrix, false, PMatrix);
+
+				vertexPositionAttribute = gl.getAttribLocation(glProgram, "aVertexPosition");
+				gl.enableVertexAttribArray(vertexPositionAttribute);
+
+				gl.bindBuffer(gl.ARRAY_BUFFER, RamasVerticeBuffer);
+				gl.vertexAttribPointer(vertexPositionAttribute, 3, gl.FLOAT, false, 0, 0);
+
+				gl.drawArrays(gl.LINES, 0, lineVertices.length); //Cuidado con el numero de vertices
+			}
+
+
+/*
+***********************
+funcion: setupBuffersHojas
+Iniciara los buffers con los vertices para crear las hojas y las flores
+***********************
+*/
+
+
+			function setupBuffersHojas()
+			{
+				//BUFFERS PARA LAS HOJAS
+				HojasVerticeBuffer = gl.createBuffer();
+
+				//Enlazo al buffer
+				gl.bindBuffer(gl.ARRAY_BUFFER, HojasVerticeBuffer);//ARRAY_BUFFER son datos vertice
+				//Enviamos los datos al Buffer
+				gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(leavesVertices), gl.STATIC_DRAW);
+
+				//BUFFER de color
+		    colorBuffer = gl.createBuffer();
+		    gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
+		    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(ColorHojas), gl.STATIC_DRAW);
+
+		    colorLocation = gl.getAttribLocation(glProgram, "aVertexColor");
+		    gl.enableVertexAttribArray(colorLocation);
+		    gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
+		    gl.vertexAttribPointer(colorLocation, 3, gl.FLOAT, false, 0, 0);
+
+				uMvMatrix = gl.getUniformLocation(glProgram, 'uMvMatrix');
+				uPMatrix = gl.getUniformLocation(glProgram, 'uPMatrix');
+			}
+
+
+/*
+*********************
+funcion: drawSceneHojas
+Dibujara las hojas y las flores del arbol
+*********************
+*/
+
+			function drawSceneHojas()
+			{
+				gl.uniformMatrix4fv(uMvMatrix, false, MvMatrix);
+				gl.uniformMatrix4fv(uPMatrix, false, PMatrix);
+
+				vertexPositionAttribute = gl.getAttribLocation(glProgram, "aVertexPosition");
+				gl.enableVertexAttribArray(vertexPositionAttribute);
+
+				gl.bindBuffer(gl.ARRAY_BUFFER, HojasVerticeBuffer);
+				gl.vertexAttribPointer(vertexPositionAttribute, 3, gl.FLOAT, false, 0, 0);
+
+				gl.drawArrays(gl.TRIANGLES, 0, leavesVertices.length);
+			}
+
+
+/*
+funcion: animacion
+Permite rotar el arbol
+*/
+			function animacion(){
+				setupBuffersRamas();
+				drawSceneRamas();
+
+				setupBuffersHojas();
+				drawSceneHojas();
+
+				requestAnimationFrame(animacion);
+			}
+
+/*
+*********************
+funcion: mat_x_vec
+Recibe un vector y una matriz de dimensiones 3 y 3x3 respectivamente
+Devuelve el vector resultante de multiplicarlas
+*********************
+*/
+
+		 function mat_x_vec(vec, mat)
+				{
+					var x = vec[0], y = vec[1], z = vec[2];
+					var dest = [0,0,0];
+
+					dest[0] = mat[0]*x + mat[3]*y + mat[6]*z;
+					dest[1] = mat[1]*x + mat[4]*y + mat[7]*z;
+					dest[2] = mat[2]*x + mat[5]*y + mat[8]*z;
+
+					return dest;
+				}
+
+/*
+*********************
+funcion: multiply
+Recibe dos matrices de dimension 3x3
+Devuelve la matriz producto de ambas
+*********************
+*/
+
+				function multiply(out, a, b) {
+				  let a00 = a[0], a01 = a[1], a02 = a[2];
+				  let a10 = a[3], a11 = a[4], a12 = a[5];
+				  let a20 = a[6], a21 = a[7], a22 = a[8];
+				  let b00 = b[0], b01 = b[1], b02 = b[2];
+				  let b10 = b[3], b11 = b[4], b12 = b[5];
+				  let b20 = b[6], b21 = b[7], b22 = b[8];
+				  out[0] = b00 * a00 + b01 * a10 + b02 * a20;
+				  out[1] = b00 * a01 + b01 * a11 + b02 * a21;
+				  out[2] = b00 * a02 + b01 * a12 + b02 * a22;
+				  out[3] = b10 * a00 + b11 * a10 + b12 * a20;
+				  out[4] = b10 * a01 + b11 * a11 + b12 * a21;
+				  out[5] = b10 * a02 + b11 * a12 + b12 * a22;
+				  out[6] = b20 * a00 + b21 * a10 + b22 * a20;
+				  out[7] = b20 * a01 + b21 * a11 + b22 * a21;
+				  out[8] = b20 * a02 + b21 * a12 + b22 * a22;
+				  return out;
+				}
+
+/*
+*************************
+funcion: palabra
+Genera la palabra con gramaticas de lindenmayer
+Recibe una serie de producciones, que se realizaran de forma recursiva
+tantas veces como niveles de recursión se pongan
+Así generara una palabra con simbolos que despues la tortuga dara significado
+*************************
+*/
+
+		function palabra(gen0, genA, genB, genC, genD, genE, genG, niveles, palabra_k){
+
+					if (niveles==0) {
+						//Fin de la recursion, devolver palabra que deberá entender la tortuga
+						return palabra_act;
+					}
+					else {
+						palabra_act = [] ;
+						/*Se realizan las producciones sustituyendo una aparicion de un
+						simbolo por su correspondiente produccion*/
+						for (var i = 0; i < palabra_k.length; i++) {
+								switch(palabra_k[i]){
+									case 'O':
+										palabra_act = palabra_act.concat(gen0);
+									break;
+									case 'A':
+										palabra_act = palabra_act.concat(genA);
+									break;
+									case 'B':
+										palabra_act = palabra_act.concat(genB);
+									break;
+									case 'C':
+										palabra_act = palabra_act.concat(genC);
+									break;
+									case 'D':
+										palabra_act = palabra_act.concat(genD);
+									break;
+									case 'E':
+										palabra_act = palabra_act.concat(genE);
+									break;
+									case 'G':
+										palabra_act = palabra_act.concat(genG);
+									break;
+									default:
+										palabra_act = palabra_act.concat(palabra_k[i]);
+									break;
+								}
+						}
+						//Recursion
+						palabra(gen0, genA, genB, genC, genD, genE, genG, niveles-1, palabra_act);
+					}
+	      }
+
+
+/*
+***********************
+funcion: tortuga
+A partir de la palabra generada, se encargara de dar significado a cada simbolo
+para generar todos los vertices de las ramas, hojas y flores
+Funciona a traves de un vector, llamado H, que indicara la direccion en la que
+habra que poner el siguiente vertice
+Para ello, este vector se ira rotando en funcion del simbolo leido
+Recibe una palabra, un angulo de ramificacion, la probabilidad de generar flores
+y el punto inicial del arbol (tronco)
+Llenara los vectores lineVertices y leavesVertices con los vertices de ramas y hojas
+*/
+			function tortuga(palabra, tronco, angle, p_flor){
+
+				//Añadimos al comienzo una serie de simbolos F para pintar un tronco alto
+				palabra = genTronco.concat(palabra)
+
+				//Primera posicion
+				var x0 = tronco[0];
+				var y0 = tronco[1];
+				var z0 = tronco[2];
+
+				/*Matrices de rotacion del vector H*/
+				var Ru = mat3.create();
+				mat3.identity(Ru);
+
+				var Rl = mat3.create();
+				mat3.identity(Rl);
+
+				var Rh = mat3.create;
+				mat3.identity(Rh);
+
+				//Comienza siendo asi para que empiece a crecer hacia arriba
+				var vectorH = vec3.create([0,1,0]);
+
+				var radian = null;
+				var cosB = null;
+				var sinB = null;
+
+				//Matriz para la rotacion aleatoria de las hojas y de las flores
+				var RotarHojas = mat3.create();
+
+				/*
+				Estado: vector que almacena el estado de la tortuga
+				Se guarda en el el punto anterior añadido (componentes x y z),
+				y la ultima direccion a la que apuntaba el vector H
+				*/
+
+				var estado = [x0, y0, z0, vectorH];
+
+				//Almacenara la siguiente posicion
+				var sig_pos = [];
+
+				//Longitud de cada rama
+				var d = 0.05;
+
+				//Tamaño hojas
+				var tam = 0.015;
+
+				/*
+				Pila de estados: Almacenara el estado actual cuando haya que ramificar
+				para retomar desde la posicion donde empezo la rama
+				Funciona de forma LIFO
+				*/
+				var pila_estados = [];
+
+				for (var i = 0; i < palabra.length; i++) {
+
+					switch(palabra[i]){
+						case 'F':
+
+							 /*
+							 Coordenadas siguientes
+							 Las calculamos en funcion del vector H, que indica hacia donde
+							 moverse, y de la longitud
+							 */
+							 sig_pos = [estado[0]+d*estado[3][0], estado[1]+d*estado[3][1],
+							 						estado[2]+d*estado[3][2]];
+
+							 /*
+							  Se guarda en el array de vertices la posicion actual y la siguiente
+								para pintar la linea que va desde un punto a otro
+								*/
+							 lineVertices.push(estado[0], estado[1], estado[2],
+								 								 sig_pos[0], sig_pos[1], sig_pos[2]);
+
+							 /*
+							 Actualizamos el estado ya que el punto anterior es del que
+							 partirá a siguiente rama
+							 */
+							 estado = [sig_pos[0], sig_pos[1], sig_pos[2], estado[3]];
+
+							 //Damos color a los dos vertices que añadimos
+							 ColorRamas.push(0.4,0.2,0,
+								 							 0.4,0.2,0);
+
+						break;
+
+						case '+':
+						/*
+						Se rota el vector H con la matriz de rotacion U
+						*/
+								//Incrementar el angulo
+								anguloU = angle;
+
+								radian = Math.PI * anguloU / 180.0;
+								cosB = Math.cos(radian);
+								sinB = Math.sin(radian);
+
+								Ru = mat3.create([
+									 cosB, sinB, 0.0,
+									 -sinB,cosB, 0.0,
+									  0.0,  0.0, 1.0
+								]);
+
+								//Rotar el vector H
+								var nuevoH = mat_x_vec(estado[3], Ru);
+
+								//Actualizamos el estado con el nuevo vector H
+							  if(Math.random()<p_giro) estado = [estado[0],estado[1],estado[2],nuevoH];
+						break;
+
+						case '-':
+						/*
+						Se rota el vector H con la matriz de rotacion U
+						*/
+								//Decrementar el angulo
+								anguloU = - angle;
+
+								radian = Math.PI * anguloU / 180.0;
+								cosB = Math.cos(radian);
+								sinB = Math.sin(radian);
+
+								Ru = mat3.create([
+									 cosB, sinB, 0.0,
+									 -sinB,cosB, 0.0,
+									 0.0,   0.0, 1.0
+								]);
+
+								//Rotar el vector H
+								var nuevoH = mat_x_vec(estado[3], Ru);
+
+								//Actualizamos el estado con el nuevo vector H
+								if(Math.random()<p_giro) estado = [estado[0],estado[1],estado[2],nuevoH];
+						break;
+
+						case '&':
+						/*
+						Se rota el vector H con la matriz de rotacion L
+						*/
+								anguloL = angle;
+
+								radian = Math.PI * anguloL / 180.0;
+								cosB = Math.cos(radian);
+								sinB = Math.sin(radian);
+
+								Rl = mat3.create([
+									 cosB, 0.0, -sinB,
+									 0.0,  1.0,   0.0,
+									 sinB, 0.0,  cosB
+								]);
+
+								//Rotar el vector H
+								var nuevoH = mat_x_vec(estado[3], Rl);
+
+								//Actualizamos el estado con el nuevo vector H
+								if(Math.random()<p_giro) estado = [estado[0],estado[1],estado[2],nuevoH];
+						break;
+
+						case '^':
+						/*
+						Se rota el vector H con la matriz de rotacion L
+						*/
+								anguloL = - angle;
+
+								radian = Math.PI * anguloL / 180.0;
+								cosB = Math.cos(radian);
+								sinB = Math.sin(radian);
+
+								Rl = mat3.create([
+									 cosB, 0.0, -sinB,
+									 0.0,  1.0,   0.0,
+									 sinB, 0.0,  cosB
+								]);
+
+								//Rotar el vector H
+								var nuevoH = mat_x_vec(estado[3], Rl);
+
+								//Actualizamos el estado con el nuevo vector H
+								if(Math.random()<p_giro) estado = [estado[0],estado[1],estado[2],nuevoH];
+						break;
+
+						case '?':
+						/*
+						Se rota el vector H con la matriz de rotacion H
+						*/
+								anguloL = angle;
+
+								radian = Math.PI * anguloL / 180.0;
+								cosB = Math.cos(radian);
+								sinB = Math.sin(radian);
+
+								Rh = mat3.create([
+									 1.0 , 0.0,   0.0,
+									 0.0,  cosB, -sinB,
+									 0.0,  sinB,  cosB
+								]);
+
+								//Rotar el vector H
+								var nuevoH = mat_x_vec(estado[3], Rh);
+
+								//Actualizamos el estado con el nuevo vector H
+								if(Math.random()<p_giro) estado = [estado[0],estado[1],estado[2],nuevoH];
+						break;
+
+						case '/':
+						/*
+						Se rota el vector H con la matriz de rotacion H
+						*/
+								anguloL = - angle;
+
+								radian = Math.PI * anguloL / 180.0;
+								cosB = Math.cos(radian);
+								sinB = Math.sin(radian);
+
+								Rh = mat3.create([
+									 1.0 , 0.0,   0.0,
+									 0.0,  cosB, -sinB,
+									 0.0,  sinB,  cosB
+								]);
+
+								//Rotar el vector H
+								var nuevoH = mat_x_vec(estado[3], Rh);
+
+								//Actualizamos el estado con el nuevo vector H
+								if(Math.random()<p_giro) estado = [estado[0],estado[1],estado[2],nuevoH];
+						break;
+
+						case 'h':
+						/*
+						Dibujar hojas
+						Calculamos 3 angulos de rotacion aleatorios para que las hojas tengan
+						direcciones diferentes
+						Con esos angulos llenamos las matrices de rotacion
+						*/
+								var rand_angle_x = degToRad(Math.random() * 90);
+								var rand_angle_y = degToRad(Math.random() * 90);
+								var rand_angle_z = degToRad(Math.random() * 90);
+
+								cosB = Math.cos(rand_angle_x);
+								sinB = Math.sin(rand_angle_x);
+
+								var RandRx = mat3.create([
+									 cosB, sinB, 0.0,
+									 -sinB,cosB, 0.0,
+									 0.0,   0.0, 1.0
+								]);
+
+								cosB = Math.cos(rand_angle_y);
+								sinB = Math.sin(rand_angle_y);
+
+								var RandRy = mat3.create([
+									 cosB, 0.0, -sinB,
+									 0.0,  1.0,   0.0,
+									 sinB, 0.0,  cosB
+								]);
+
+								cosB = Math.cos(rand_angle_z);
+								sinB = Math.sin(rand_angle_z);
+
+								var RandRz = mat3.create([
+									1.0 , 0.0,   0.0,
+									0.0,  cosB, -sinB,
+									0.0,  sinB,  cosB
+								]);
+
+								//Multiplicamos las matrices para obtener la de rotacion global
+								multiply(RandRx, RandRx, RandRy);
+								multiply(RotarHojas, RandRx, RandRz);
+
+								/*
+								Se crea una hoja modelo que sale del vertice 0,0,0
+								*/
+								var hoja_modelo = mat3.create([0,	0,	0,
+																							-tam,tam,0,
+																							tam,tam,0]);
+								//Rotamos esa hoja modelo
+								multiply(hoja_modelo, RotarHojas, hoja_modelo);
+
+								/*
+								Y finalmente la trasladamos al punto en el que se encontrara
+								la tortuga cuando aparecio el simbolo de pintar una hoja
+								Este punto, recordamos que estaba almacenado en las
+								posiciones 0,1 y 2 del vector que guarda el estado
+								*/
+								var hojas = mat3.create([estado[0]+hoja_modelo[0],estado[1]+hoja_modelo[1],estado[2]+hoja_modelo[2],
+																				 estado[0]+hoja_modelo[3],estado[1]+hoja_modelo[4], estado[2]+hoja_modelo[5],
+																				 estado[0]+hoja_modelo[6],estado[1]+hoja_modelo[7], estado[2]+hoja_modelo[8]]);
+
+								//Añadimos los vertices al vector que guarda las hojas
+								leavesVertices.push(hojas[0],hojas[1],hojas[2],
+																		hojas[3],hojas[4],hojas[5],
+																	  hojas[6],hojas[7],hojas[8]);
+
+								//Damos color a los 3 vertices de la hoja
+								ColorHojas.push(0, 180/255, 0,
+																0, 180/255, 0,
+																0, 180/255, 0);
+
+						break;
+
+						case 'f':
+						/*
+						Dibujar flores
+						Calculamos 3 angulos de rotacion aleatorios para que las hojas tengan
+						direcciones diferentes
+						Con esos angulos llenamos las matrices de rotacion
+						El funcionamiento es exactamente igual que para dibujar hojas, pero
+						en lugar de generar un triangulo, se generan 4
+						Se dibujara una flor con probabilidad p_flor
+						*/
+
+								if(Math.random()<p_flor){
+										var flor_modelo1 = [0,	0,	0,
+																				-tam/2,2*tam,0,
+																				 tam/2,2*tam,0];
+
+										var flor_modelo2 = [0,	0,	0,
+			 																	-2*tam, tam/2,0,
+			 																	-2*tam,-tam/2,0];
+
+										var flor_modelo3 = [0,	0,	0,
+			 																	-tam/2,-2*tam,0,
+			 																	 tam/2,-2*tam,0];
+
+										var flor_modelo4 = [0,	0,	0,
+																				2*tam, tam/2,0,
+																				2*tam,-tam/2,0];
+
+										var rand_angle_x = degToRad(Math.random() * 90);
+										var rand_angle_y = degToRad(Math.random() * 90);
+										var rand_angle_z = degToRad(Math.random() * 90);
+
+										cosB = Math.cos(rand_angle_x);
+										sinB = Math.sin(rand_angle_x);
+
+										var RandRx = mat3.create([
+											 cosB, sinB, 0.0,
+											 -sinB,cosB, 0.0,
+											 0.0,   0.0, 1.0
+										]);
+
+										cosB = Math.cos(rand_angle_y);
+										sinB = Math.sin(rand_angle_y);
+
+										var RandRy = mat3.create([
+											 cosB, 0.0, -sinB,
+											 0.0,  1.0,   0.0,
+											 sinB, 0.0,  cosB
+										]);
+
+										cosB = Math.cos(rand_angle_z);
+										sinB = Math.sin(rand_angle_z);
+
+										var RandRz = mat3.create([
+											1.0 , 0.0,   0.0,
+											0.0,  cosB, -sinB,
+											0.0,  sinB,  cosB
+										]);
+
+										multiply(RandRx, RandRx, RandRy);
+										multiply(RotarHojas, RandRx, RandRz);
+
+										multiply(flor_modelo1, RotarHojas, flor_modelo1);
+										multiply(flor_modelo2, RotarHojas, flor_modelo2);
+										multiply(flor_modelo3, RotarHojas, flor_modelo3);
+										multiply(flor_modelo4, RotarHojas, flor_modelo4);
+
+										var flores1 = mat3.create([estado[0]+flor_modelo1[0],estado[1]+flor_modelo1[1], estado[2]+flor_modelo1[2],
+																						   estado[0]+flor_modelo1[3],estado[1]+flor_modelo1[4], estado[2]+flor_modelo1[5],
+																						   estado[0]+flor_modelo1[6],estado[1]+flor_modelo1[7], estado[2]+flor_modelo1[8]]);
+									  var flores2 = mat3.create([estado[0]+flor_modelo2[0],estado[1]+flor_modelo2[1], estado[2]+flor_modelo2[2],
+																						   estado[0]+flor_modelo2[3],estado[1]+flor_modelo2[4], estado[2]+flor_modelo2[5],
+																						   estado[0]+flor_modelo2[6],estado[1]+flor_modelo2[7], estado[2]+flor_modelo2[8]]);
+									  var flores3 = mat3.create([estado[0]+flor_modelo3[0],estado[1]+flor_modelo3[1], estado[2]+flor_modelo3[2],
+																						   estado[0]+flor_modelo3[3],estado[1]+flor_modelo3[4], estado[2]+flor_modelo3[5],
+																						   estado[0]+flor_modelo3[6],estado[1]+flor_modelo3[7], estado[2]+flor_modelo3[8]]);
+									  var flores4 = mat3.create([estado[0]+flor_modelo4[0],estado[1]+flor_modelo4[1], estado[2]+flor_modelo4[2],
+																						   estado[0]+flor_modelo4[3],estado[1]+flor_modelo4[4], estado[2]+flor_modelo4[5],
+																						   estado[0]+flor_modelo4[6],estado[1]+flor_modelo4[7], estado[2]+flor_modelo4[8]]);
+
+									  leavesVertices.push(flores1[0],flores1[1],flores1[2],
+																				flores1[3],flores1[4],flores1[5],
+																			  flores1[6],flores1[7],flores1[8]);
+										leavesVertices.push(flores2[0],flores2[1],flores2[2],
+																				flores2[3],flores2[4],flores2[5],
+																			  flores2[6],flores2[7],flores2[8]);
+										leavesVertices.push(flores3[0],flores3[1],flores3[2],
+																				flores3[3],flores3[4],flores3[5],
+																			  flores3[6],flores3[7],flores3[8]);
+										leavesVertices.push(flores4[0],flores4[1],flores4[2],
+																				flores4[3],flores4[4],flores4[5],
+																				flores4[6],flores4[7],flores4[8]);
+
+										//Damos color a los vertices de la flor
+										ColorHojas.push(1,0,0,
+																		1,0,0,
+																		1,0,0,
+																		1,0,0,
+																		1,0,0,
+																		1,0,0,
+																		1,0,0,
+																		1,0,0,
+																		1,0,0,
+																		1,0,0,
+																		1,0,0,
+																		1,0,0);
+								}
+						break;
+
+						case '[':
+						/*
+						Ramificacion, se apila el estado
+						*/
+							 pila_estados.push(estado);
+						break;
+
+						case ']':
+						/*
+						Fin de la rama, recuperamos el estado para seguir desde donde se dejo
+						*/
+							 estado = pila_estados.pop();
+						break;
+
+					}
+				}
+			}
+
+		</script>
+	</head>
+	<body onload="initWebGL()">
+		<h1> Practica 2: Arbol mediante L-System</h1>
+		<h3> Alejandro Del Hierro Diez </h3>
+		<canvas id="ejemplo-shader" width="500" height="500">
+		 El navegador no admite WEBGL
+		</canvas>
+	</body>
+
+	<div class="slidecontainer">
+		<input type="range" min="1" max="90" value="40" class="slider" id="Angulo">
+	  Angulo de ramificación
+	</div>
+	<div class="slidecontainer">
+		<input type="range" min="1" max="9" value="9" class="slider" id="Nivel">
+		Niveles de recursion
+	</div>
+
+	<script type="text/javascript">
+		  var angulo = document.getElementById("Angulo");
+			var nivel = document.getElementById("Nivel");
+
+			angulo.oninput = function() {
+				angle = this.value;
+
+				leavesVertices = [];
+				lineVertices = [];
+
+				tortuga(palabra_act, tronco, angle, p_flor);
+
+				setupBuffersRamas();
+				drawSceneRamas();
+
+				setupBuffersHojas();
+				drawSceneHojas();
+			}
+			nivel.oninput = function() {
+				niveles = this.value;
+
+				leavesVertices = [];
+				lineVertices = [];
+
+				palabra(gen0
+								,genA
+								,genB
+								,genC
+								,genD
+								,genE
+								,genG, niveles, palabra_inic);
+
+				tortuga(palabra_act, tronco, angle, p_flor);
+
+				setupBuffersRamas();
+				drawSceneRamas();
+
+				setupBuffersHojas();
+				drawSceneHojas();
+			}
+
+	</script>
+
+	<style>
+	.slidecontainer {
+	  width: 200px;
+	}
+
+	.slider {
+	  -webkit-appearance: none;
+	  width: 100%;
+	  height: 10px;
+	  border-radius: 5px;
+	  background: LightGrey;
+	}
+
+	.slider:hover {
+	  opacity: 1;
+	}
+
+	.slider::-webkit-slider-thumb {
+	  -webkit-appearance: none;
+	  appearance: none;
+	  width: 15px;
+	  height: 15px;
+	  border-radius: 100%;
+	  background: Black;
+	  cursor: pointer;
+	}
+
+
+	</style>
+
+</html>
